@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Match 3 Mania</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Poppins', sans-serif; touch-action: manipulation; }
+        .game-board {
+            display: grid; position: relative;
+            grid-template-columns: repeat(var(--board-size), 1fr);
+            grid-template-rows: repeat(var(--board-size), 1fr);
+            gap: 4px; padding: 8px; border-radius: 12px;
+            background-color: rgba(255, 255, 255, 0.1);
+            box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+            backdrop-filter: blur(4px); border: 1px solid rgba(255, 255, 255, 0.18);
+        }
+        .gem {
+            width: 100%; height: 100%; border-radius: 8px;
+            display: flex; align-items: center; justify-content: center;
+            cursor: pointer; position: absolute;
+            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), top 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .gem-inner {
+            width: 100%; height: 100%; display: flex;
+            align-items: center; justify-content: center;
+            font-size: clamp(20px, 6vw, 40px); border-radius: 8px;
+            transition: transform 0.2s ease-out, box-shadow 0.3s ease;
+        }
+        .gem.selected .gem-inner { transform: scale(1.15); box-shadow: 0 0 20px 5px rgba(255, 255, 0, 0.8); }
+        .gem.hint .gem-inner { box-shadow: 0 0 25px 8px rgba(52, 211, 153, 0.9); transform: scale(1.1); }
+        @keyframes match-animation {
+            0% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.2); opacity: 0.5; }
+            100% { transform: scale(0); opacity: 0; }
+        }
+        .gem.matched { animation: match-animation 0.5s forwards; z-index: 10; }
+        :root { --board-size: 8; }
+        #modal-container { transition: opacity 0.3s ease-in-out; }
+        .spinner { border-top-color: #3498db; animation: spin 1s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 min-h-screen flex flex-col items-center justify-center p-4">
+
+    <!-- Universal Modal for Messages, Loading, and API Key Input -->
+    <div id="modal-container" class="hidden fixed inset-0 bg-black bg-opacity-60 flex flex-col items-center justify-center z-50 opacity-0">
+        <div id="modal-content" class="bg-white/30 backdrop-blur-lg p-8 rounded-2xl shadow-lg text-center text-white max-w-sm w-full">
+            <!-- Content will be injected by JavaScript -->
+        </div>
+    </div>
+
+    <div class="w-full max-w-md mx-auto">
+        <div class="text-center mb-6">
+            <h1 class="text-4xl md:text-5xl font-bold text-white shadow-lg">Match 3 Mania</h1>
+        </div>
+
+        <div class="grid grid-cols-2 gap-4 mb-4 p-4 bg-white/20 rounded-lg shadow-md backdrop-filter backdrop-blur-sm">
+            <div>
+                <span class="text-lg font-semibold text-white">分数</span>
+                <p id="score" class="text-3xl font-bold text-white">0</p>
+            </div>
+            <div>
+                <span class="text-lg font-semibold text-white">最高分</span>
+                <p id="high-score" class="text-3xl font-bold text-white">0</p>
+            </div>
+        </div>
+        
+        <div class="grid grid-cols-2 gap-4 mb-4">
+             <button id="hint-button" class="w-full px-4 py-3 bg-emerald-500 text-white font-semibold rounded-lg shadow-md hover:bg-emerald-600 transition-colors duration-300">获取提示 ✨</button>
+            <button id="restart-button" class="w-full px-4 py-3 bg-pink-500 text-white font-semibold rounded-lg shadow-md hover:bg-pink-600 transition-colors duration-300">重新开始</button>
+        </div>
+
+        <div class="mb-4 p-4 bg-white/20 rounded-lg shadow-md backdrop-filter backdrop-blur-sm">
+            <label for="theme-input" class="block text-white font-semibold mb-2">AI 主题生成器</label>
+            <div class="flex gap-2">
+                <input type="text" id="theme-input" placeholder="输入主题, 如 '水果' 或 '天气'" class="w-full px-3 py-2 rounded-lg border-2 border-transparent focus:border-purple-400 focus:outline-none">
+                <button id="theme-button" class="px-4 py-2 bg-purple-600 text-white font-semibold rounded-lg shadow-md hover:bg-purple-700 transition-colors duration-300">生成 ✨</button>
+            </div>
+        </div>
+        
+        <div class="aspect-square relative">
+            <div id="game-board" class="game-board aspect-square"></div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            // --- Game Constants ---
+            const BOARD_SIZE = 8;
+            const SCORE_PER_GEM = 10;
+            const GEMINI_MODEL = "gemini-2.5-flash-preview-05-20";
+
+            // --- Default Gems ---
+            let GEMS = ['💎', '❤️', '⭐', '🍀', '🎈', '⚡️'];
+            
+            // --- DOM Elements ---
+            const gameBoardElement = document.getElementById('game-board');
+            const scoreElement = document.getElementById('score');
+            const highScoreElement = document.getElementById('high-score');
+            const restartButton = document.getElementById('restart-button');
+            const hintButton = document.getElementById('hint-button');
+            const themeInput = document.getElementById('theme-input');
+            const themeButton = document.getElementById('theme-button');
+            const modalContainer = document.getElementById('modal-container');
+            const modalContent = document.getElementById('modal-content');
+
+            // --- Game State ---
+            let board = [];
+            let score = 0;
+            let highScore = 0;
+            let selectedGem = null;
+            let isProcessing = false;
+            let API_KEY = ""; // Will be loaded from localStorage
+
+            // --- MAIN INITIALIZATION ---
+            function main() {
+                loadState();
+                if (!API_KEY) {
+                    promptForApiKey();
+                }
+                setupEventListeners();
+                initGame();
+            }
+
+            function loadState() {
+                API_KEY = localStorage.getItem('geminiApiKey') || '';
+                highScore = parseInt(localStorage.getItem('match3HighScore') || '0');
+                updateHighScoreDisplay();
+            }
+
+            function setupEventListeners() {
+                 restartButton.addEventListener('click', initGame);
+                 hintButton.addEventListener('click', getAIHint);
+                 themeButton.addEventListener('click', generateAITheme);
+            }
+
+            function initGame() {
+                document.documentElement.style.setProperty('--board-size', BOARD_SIZE);
+                score = 0;
+                selectedGem = null;
+                isProcessing = false;
+                updateScoreDisplay();
+                createBoardData();
+                renderBoard();
+            }
+
+            // --- BOARD AND RENDERING LOGIC ---
+            function createBoardData() {
+                board = [];
+                for (let row = 0; row < BOARD_SIZE; row++) {
+                    board[row] = [];
+                    for (let col = 0; col < BOARD_SIZE; col++) {
+                        let newGem;
+                        do {
+                            newGem = GEMS[Math.floor(Math.random() * GEMS.length)];
+                        } while (
+                            (col >= 2 && newGem === board[row][col-1] && newGem === board[row][col-2]) ||
+                            (row >= 2 && newGem === board[row-1][col] && newGem === board[row-2][col])
+                        );
+                        board[row][col] = newGem;
+                    }
+                }
+            }
+            
+            function renderBoard() {
+                gameBoardElement.innerHTML = '';
+                const gemSize = gameBoardElement.clientWidth / BOARD_SIZE;
+                board.forEach((rowItems, row) => {
+                    rowItems.forEach((gemType, col) => {
+                        if(gemType) createGemElement(gemType, row, col, gemSize);
+                    });
+                });
+            }
+
+            function createGemElement(gemType, row, col, gemSize, initialTop = null) {
+                const gem = document.createElement('div');
+                gem.classList.add('gem');
+                gem.dataset.row = row;
+                gem.dataset.col = col;
+                gem.style.top = `${initialTop !== null ? initialTop : row * gemSize}px`;
+                gem.style.left = `${col * gemSize}px`;
+                gem.style.width = `${gemSize}px`;
+                gem.style.height = `${gemSize}px`;
+
+                const gemInner = document.createElement('div');
+                gemInner.classList.add('gem-inner');
+                gemInner.textContent = gemType;
+                gem.appendChild(gemInner);
+                gem.addEventListener('click', () => handleGemClick(gem));
+                gameBoardElement.appendChild(gem);
+                return gem;
+            }
+
+            function updateScoreDisplay() {
+                scoreElement.textContent = score;
+                if (score > highScore) {
+                    highScore = score;
+                    localStorage.setItem('match3HighScore', highScore);
+                    updateHighScoreDisplay();
+                }
+            }
+            
+            function updateHighScoreDisplay() {
+                highScoreElement.textContent = highScore;
+            }
+
+            // --- GAME INTERACTION AND CORE FLOW ---
+            async function handleGemClick(clickedGemElement) {
+                if (isProcessing) return;
+                const row = parseInt(clickedGemElement.dataset.row);
+                const col = parseInt(clickedGemElement.dataset.col);
+
+                if (selectedGem) {
+                    selectedGem.element.classList.remove('selected');
+                    if (selectedGem.row === row && selectedGem.col === col) {
+                        selectedGem = null;
+                        return;
+                    }
+                    const secondGem = { row, col, element: clickedGemElement };
+                    if (isValidSwap(selectedGem, secondGem)) {
+                        await performSwap(selectedGem, secondGem);
+                        await processMatches();
+                    }
+                    selectedGem = null;
+                } else {
+                    selectedGem = { row, col, element: clickedGemElement };
+                    clickedGemElement.classList.add('selected');
+                }
+            }
+
+            function isValidSwap(gem1, gem2) {
+                const rowDiff = Math.abs(gem1.row - gem2.row);
+                const colDiff = Math.abs(gem1.col - gem2.col);
+                return (rowDiff === 1 && colDiff === 0) || (rowDiff === 0 && colDiff === 1);
+            }
+
+            async function performSwap(gem1, gem2) {
+                isProcessing = true;
+                [board[gem1.row][gem1.col], board[gem2.row][gem2.col]] = [board[gem2.row][gem2.col], board[gem1.row][gem1.col]];
+                await animateSwap(gem1.element, gem2.element);
+                
+                gem1.element.dataset.row = gem2.row;
+                gem1.element.dataset.col = gem2.col;
+                gem2.element.dataset.row = gem1.row;
+                gem2.element.dataset.col = gem1.col;
+                
+                const matches = findMatches();
+                if (matches.length === 0) {
+                    await new Promise(resolve => setTimeout(resolve, 150));
+                    [board[gem1.row][gem1.col], board[gem2.row][gem2.col]] = [board[gem2.row][gem2.col], board[gem1.row][gem1.col]];
+                    await animateSwap(gem1.element, gem2.element);
+                    
+                    gem1.element.dataset.row = gem1.row;
+                    gem1.element.dataset.col = gem1.col;
+                    gem2.element.dataset.row = gem2.row;
+                    gem2.element.dataset.col = gem2.col;
+                }
+                isProcessing = false;
+            }
+            
+            async function processMatches() {
+                isProcessing = true;
+                let matches = findMatches();
+                while(matches.length > 0) {
+                    score += matches.length * SCORE_PER_GEM;
+                    updateScoreDisplay();
+                    await animateAndRemoveMatches(matches);
+                    await handleGravityAndRefill();
+                    matches = findMatches();
+                }
+                isProcessing = false;
+            }
+
+            function findMatches() {
+                const matches = new Set();
+                for (let r = 0; r < BOARD_SIZE; r++) {
+                    for (let c = 0; c < BOARD_SIZE - 2; c++) {
+                        if (board[r][c] && board[r][c] === board[r][c+1] && board[r][c] === board[r][c+2]) {
+                            matches.add(`${r}-${c}`).add(`${r}-${c+1}`).add(`${r}-${c+2}`);
+                        }
+                    }
+                }
+                for (let c = 0; c < BOARD_SIZE; c++) {
+                    for (let r = 0; r < BOARD_SIZE - 2; r++) {
+                        if (board[r][c] && board[r][c] === board[r+1][c] && board[r][c] === board[r+2][c]) {
+                            matches.add(`${r}-${c}`).add(`${r+1}-${c}`).add(`${r+2}-${c}`);
+                        }
+                    }
+                }
+                return [...matches].map(id => {
+                    const [row, col] = id.split('-').map(Number);
+                    return { row, col };
+                });
+            }
+
+            // --- ANIMATIONS AND EFFECTS ---
+            async function animateSwap(elem1, elem2) {
+                const rect1 = { top: elem1.style.top, left: elem1.style.left };
+                const rect2 = { top: elem2.style.top, left: elem2.style.left };
+                elem1.style.top = rect2.top;
+                elem1.style.left = rect2.left;
+                elem2.style.top = rect1.top;
+                elem2.style.left = rect1.left;
+                await new Promise(resolve => setTimeout(resolve, 300));
+            }
+            
+            async function animateAndRemoveMatches(matches) {
+                const promises = matches.map(match => {
+                    const gemElement = document.querySelector(`[data-row='${match.row}'][data-col='${match.col}']`);
+                    if (gemElement) {
+                        gemElement.classList.add('matched');
+                        return new Promise(resolve => gemElement.addEventListener('animationend', resolve, { once: true }));
+                    }
+                });
+                await Promise.all(promises);
+                matches.forEach(match => {
+                    const gemElement = document.querySelector(`[data-row='${match.row}'][data-col='${match.col}']`);
+                    if (gemElement) gemElement.remove();
+                    board[match.row][match.col] = null;
+                });
+            }
+
+            async function handleGravityAndRefill() {
+                const gemSize = gameBoardElement.clientWidth / BOARD_SIZE;
+                const fallPromises = [];
+                for (let c = 0; c < BOARD_SIZE; c++) {
+                    let emptyRow = BOARD_SIZE - 1;
+                    for (let r = BOARD_SIZE - 1; r >= 0; r--) {
+                        if (board[r][c]) {
+                            if (emptyRow !== r) {
+                                const gemElement = document.querySelector(`[data-row='${r}'][data-col='${c}']`);
+                                gemElement.style.top = `${emptyRow * gemSize}px`;
+                                gemElement.dataset.row = emptyRow;
+                                fallPromises.push(new Promise(resolve => setTimeout(resolve, 400)));
+                                [board[emptyRow][c], board[r][c]] = [board[r][c], null];
+                            }
+                            emptyRow--;
+                        }
+                    }
+                }
+                for (let r = 0; r < BOARD_SIZE; r++) {
+                    for (let c = 0; c < BOARD_SIZE; c++) {
+                        if (!board[r][c]) {
+                            board[r][c] = GEMS[Math.floor(Math.random() * GEMS.length)];
+                            const initialTop = -gemSize;
+                            const gemElement = createGemElement(board[r][c], r, c, gemSize, initialTop);
+                            await new Promise(resolve => setTimeout(resolve, 10)); 
+                            gemElement.style.top = `${r * gemSize}px`;
+                            fallPromises.push(new Promise(resolve => setTimeout(resolve, 400)));
+                        }
+                    }
+                }
+                await Promise.all(fallPromises);
+            }
+
+            // --- AI FEATURES ---
+            async function getAIHint() {
+                if (isProcessing || !checkApiKey()) return;
+                showModal('loading', "AI 正在分析棋盘...");
+                const boardString = board.map(row => row.join(' ')).join('\n');
+                const prompt = `You are a Match-3 game expert. Find one valid move on the board below. A valid move is swapping two adjacent (not diagonal) gems to create a match of 3 or more identical gems horizontally or vertically. Board:\n${boardString}\nAnalyze the board and provide the coordinates of the two gems to swap. Respond with ONLY a JSON object in the format: {"from": {"row": r, "col": c}, "to": {"row": r, "col": c}}. Find a real, valid move.`;
+                const responseText = await callGeminiAPI(prompt, true);
+                hideModal();
+                if (responseText) {
+                    try {
+                        const move = JSON.parse(responseText);
+                        if (move && move.from && move.to) highlightHint(move.from, move.to);
+                        else showModal('message', "AI 未能找到可行的移动。");
+                    } catch (e) { console.error("Failed to parse AI hint response:", e); showModal('message', "AI 返回了无效的提示格式。"); }
+                }
+            }
+
+            function highlightHint(from, to) {
+                const gem1 = document.querySelector(`[data-row='${from.row}'][data-col='${from.col}']`);
+                const gem2 = document.querySelector(`[data-row='${to.row}'][data-col='${to.col}']`);
+                if (gem1 && gem2) {
+                    gem1.classList.add('hint'); gem2.classList.add('hint');
+                    setTimeout(() => { gem1.classList.remove('hint'); gem2.classList.remove('hint'); }, 2000);
+                }
+            }
+
+            async function generateAITheme() {
+                const theme = themeInput.value.trim();
+                if (!theme) { showModal('message', "请输入一个主题！"); return; }
+                if (!checkApiKey()) return;
+                showModal('loading', `正在为 "${theme}" 主题生成宝石...`);
+                const prompt = `Generate an array of 6 unique, single-character emojis for a match-3 game based on the theme "${theme}". Respond with ONLY a JSON array of strings. For example, for the theme "fruit", a valid response would be: ["🍎", "🍌", "🍇", "🍓", "🍉", "🍊"]`;
+                const responseText = await callGeminiAPI(prompt, true);
+                hideModal();
+                if (responseText) {
+                    try {
+                        const newGems = JSON.parse(responseText);
+                        if (Array.isArray(newGems) && newGems.length >= 6) {
+                            GEMS = newGems.slice(0, 6);
+                            themeInput.value = '';
+                            initGame();
+                        } else { showModal('message', "AI 未能生成有效的主题。请再试一次。"); }
+                    } catch (e) { console.error("Failed to parse AI theme response:", e); showModal('message', "AI 返回了无效的主题格式。"); }
+                }
+            }
+            
+            async function callGeminiAPI(prompt, isJson = false) {
+                const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${API_KEY}`;
+                try {
+                    const payload = { contents: [{ parts: [{ text: prompt }] }] };
+                    if (isJson) { payload.generationConfig = { responseMimeType: "application/json" } }
+                    const response = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                    if (!response.ok) { throw new Error(`API Error: ${response.statusText}`); }
+                    const result = await response.json();
+                    return result.candidates?.[0]?.content?.parts?.[0]?.text;
+                } catch (error) {
+                    console.error("Gemini API call failed:", error);
+                    hideModal();
+                    showModal('message', `AI 请求失败: ${error.message}`);
+                    return null;
+                }
+            }
+
+            // --- MODAL AND API KEY MANAGEMENT ---
+            function checkApiKey() {
+                if (!API_KEY) {
+                    promptForApiKey();
+                    return false;
+                }
+                return true;
+            }
+
+            function promptForApiKey() {
+                const content = `
+                    <h2 class="text-2xl font-bold mb-4">请输入您的 API 密钥</h2>
+                    <p class="mb-4">要使用 AI 功能，您需要一个免费的 Google AI API 密钥。</p>
+                    <input type="password" id="api-key-input" class="w-full px-3 py-2 rounded-lg border-2 text-gray-800 border-purple-400 focus:outline-none mb-4" placeholder="在此处粘贴您的密钥">
+                    <button id="save-api-key-btn" class="w-full px-4 py-2 bg-purple-600 text-white font-semibold rounded-lg shadow-md hover:bg-purple-700">保存并开始游戏</button>
+                    <a href="https://makersuite.google.com/app/apikey" target="_blank" class="text-sm mt-4 inline-block hover:underline">如何获取免费密钥？</a>
+                `;
+                showModal('custom', content);
+                document.getElementById('save-api-key-btn').addEventListener('click', () => {
+                    const inputKey = document.getElementById('api-key-input').value.trim();
+                    if(inputKey) {
+                        API_KEY = inputKey;
+                        localStorage.setItem('geminiApiKey', API_KEY);
+                        hideModal();
+                    }
+                });
+            }
+
+            function showModal(type, content) {
+                let html = '';
+                if (type === 'loading') {
+                    html = `<div class="spinner w-16 h-16 border-8 border-gray-300 rounded-full mb-4"></div><p class="text-xl font-semibold">${content}</p>`;
+                } else if (type === 'message') {
+                    html = `<p class="text-xl font-semibold mb-4">${content}</p><button id="modal-ok-btn" class="px-6 py-2 bg-purple-600 rounded-lg hover:bg-purple-700">好的</button>`;
+                } else {
+                    html = content;
+                }
+                modalContent.innerHTML = html;
+                modalContainer.classList.remove('hidden');
+                setTimeout(() => modalContainer.classList.remove('opacity-0'), 10);
+                if (type === 'message') {
+                    document.getElementById('modal-ok-btn').addEventListener('click', hideModal);
+                }
+            }
+
+            function hideModal() {
+                modalContainer.classList.add('opacity-0');
+                setTimeout(() => modalContainer.classList.add('hidden'), 300);
+            }
+
+            // --- START THE GAME ---
+            main();
+        });
+    </script>
+</body>
+</html>
+
